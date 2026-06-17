@@ -24,54 +24,8 @@ def _format_whatsapp_url(number: str | None) -> str | None:
     return f"https://wa.me/966{local}"
 
 
-def search_properties(neighborhood: str, max_budget: int, min_budget: int = 0):
-    """Search approved properties by neighborhood name and monthly budget (SAR).
-
-    Joins to buildings and matches the neighborhood keyword against building.name.
-    Returns up to 10 results sorted by price ascending.
-    """
-    min_budget = int(min_budget) if min_budget is not None else 0
-    max_budget = int(max_budget) if max_budget is not None else 10 ** 9
-
-    neighborhood_term = f"%{neighborhood}%"
-
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT
-                    p.id,
-                    p.title,
-                    p.location,
-                    b.name          AS building_name,
-                    p.price_monthly AS monthly_price,
-                    p.price_semi_annual,
-                    p.price_annual,
-                    p.description,
-                    p.images,
-                    p.rooms_count,
-                    p.baths_count,
-                    p.area,
-                    p.whatsapp_number
-                FROM properties p
-                LEFT JOIN buildings b ON b.id = p.building_id
-                WHERE p.status = 'approved'
-                  AND (
-                        b.name LIKE :nb
-                     OR p.title LIKE :nb
-                  )
-                  AND p.price_monthly BETWEEN :min_b AND :max_b
-                ORDER BY p.price_monthly ASC
-                LIMIT 10
-                """
-            ),
-            {
-                "nb": neighborhood_term,
-                "min_b": min_budget,
-                "max_b": max_budget,
-            },
-        ).mappings().all()
-
+def _format_rows(rows) -> list[dict]:
+    """Shared helper: convert raw DB rows into clean dicts for the API."""
     results = []
     for row in rows:
         r = dict(row)
@@ -104,9 +58,156 @@ def search_properties(neighborhood: str, max_budget: int, min_budget: int = 0):
                 r[key] = float(r[key])
 
         results.append(r)
+    return results
+
+
+def search_properties(
+    neighborhoods: "list[str] | str",
+    max_budget: int,
+    min_budget: int = 0,
+    rooms_count: int | None = None,
+):
+    """Search approved properties by neighborhood(s), budget, and optional room count.
+
+    *neighborhoods* can be a single string OR a list of strings (used when the
+    customer says a direction like "شمال" and we need to search multiple areas).
+    """
+    min_budget = int(min_budget) if min_budget is not None else 0
+    max_budget = int(max_budget) if max_budget is not None else 10 ** 9
+
+    # Normalise to a list
+    if isinstance(neighborhoods, str):
+        neighborhoods = [neighborhoods]
+
+    # Build LIKE terms
+    nb_terms = [f"%{nb}%" for nb in neighborhoods]
+
+    # Dynamic WHERE clause for multiple neighborhoods
+    nb_clauses = " OR ".join(
+        f"b.name LIKE :nb{i} OR p.title LIKE :nb{i}" for i in range(len(nb_terms))
+    )
+    params: dict = {f"nb{i}": t for i, t in enumerate(nb_terms)}
+    params["min_b"] = min_budget
+    params["max_b"] = max_budget
+
+    rooms_clause = ""
+    if rooms_count is not None:
+        rooms_clause = "AND p.rooms_count = :rooms"
+        params["rooms"] = int(rooms_count)
+
+    sql = f"""
+        SELECT
+            p.id,
+            p.title,
+            p.location,
+            b.name          AS building_name,
+            p.price_monthly AS monthly_price,
+            p.price_semi_annual,
+            p.price_annual,
+            p.description,
+            p.images,
+            p.rooms_count,
+            p.baths_count,
+            p.area,
+            p.whatsapp_number
+        FROM properties p
+        LEFT JOIN buildings b ON b.id = p.building_id
+        WHERE p.status = 'approved'
+          AND ({nb_clauses})
+          AND p.price_monthly BETWEEN :min_b AND :max_b
+          {rooms_clause}
+        ORDER BY p.price_monthly ASC
+        LIMIT 10
+    """
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+
+    results = _format_rows(rows)
 
     logger.info(
-        "DB search: neighborhood=%r budget %s-%s SAR → %d results",
-        neighborhood, min_budget, max_budget, len(results),
+        "DB search: neighborhoods=%r rooms=%s budget %s-%s SAR → %d results",
+        neighborhoods, rooms_count, min_budget, max_budget, len(results),
+    )
+    return results
+
+
+def search_upcoming_properties(
+    neighborhoods: "list[str] | str",
+    max_budget: int,
+    min_budget: int = 0,
+    rooms_count: int | None = None,
+    days_ahead: int = 30,
+):
+    """Find properties whose current rental ends within *days_ahead* days.
+
+    These are apartments that will become available soon — useful when no
+    currently-available apartment matches the customer's criteria.
+    """
+    min_budget = int(min_budget) if min_budget is not None else 0
+    max_budget = int(max_budget) if max_budget is not None else 10 ** 9
+
+    if isinstance(neighborhoods, str):
+        neighborhoods = [neighborhoods]
+
+    nb_terms = [f"%{nb}%" for nb in neighborhoods]
+    nb_clauses = " OR ".join(
+        f"b.name LIKE :nb{i} OR p.title LIKE :nb{i}" for i in range(len(nb_terms))
+    )
+    params: dict = {f"nb{i}": t for i, t in enumerate(nb_terms)}
+    params["min_b"] = min_budget
+    params["max_b"] = max_budget
+    params["days"] = int(days_ahead)
+
+    rooms_clause = ""
+    if rooms_count is not None:
+        rooms_clause = "AND p.rooms_count = :rooms"
+        params["rooms"] = int(rooms_count)
+
+    sql = f"""
+        SELECT
+            p.id,
+            p.title,
+            p.location,
+            b.name          AS building_name,
+            p.price_monthly AS monthly_price,
+            p.price_semi_annual,
+            p.price_annual,
+            p.description,
+            p.images,
+            p.rooms_count,
+            p.baths_count,
+            p.area,
+            p.whatsapp_number,
+            p.rented_until
+        FROM properties p
+        LEFT JOIN buildings b ON b.id = p.building_id
+        WHERE p.status = 'approved'
+          AND p.rented_until IS NOT NULL
+          AND p.rented_until BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL :days DAY)
+          AND ({nb_clauses})
+          AND p.price_monthly BETWEEN :min_b AND :max_b
+          {rooms_clause}
+        ORDER BY p.rented_until ASC
+        LIMIT 5
+    """
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+
+    results = _format_rows(rows)
+
+    # Add days_until_available to each result
+    from datetime import date
+    today = date.today()
+    for r in results:
+        if r.get("rented_until"):
+            delta = r["rented_until"] - today
+            r["days_until_available"] = max(delta.days, 0)
+            r["rented_until"] = str(r["rented_until"])
+
+    logger.info(
+        "DB upcoming: neighborhoods=%r rooms=%s budget %s-%s SAR within %d days → %d results",
+        neighborhoods, rooms_count, min_budget, max_budget, days_ahead, len(results),
     )
     return results

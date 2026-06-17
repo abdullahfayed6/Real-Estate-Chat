@@ -4,7 +4,7 @@ from openai import OpenAI
 
 from app.core.config import OPENAI_API_KEY, OPENAI_MODEL, logger
 from app.services.prompts import get_system_prompt, get_tools
-from app.db.database import search_properties
+from app.db.database import search_properties, search_upcoming_properties
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -20,7 +20,6 @@ def get_session(phone: str) -> list[dict]:
     if phone not in SESSIONS:
         SESSIONS[phone] = [{"role": "system", "content": get_system_prompt()}]
     else:
-        # Refresh system prompt in case dynamic config changed
         for msg in SESSIONS[phone]:
             if msg["role"] == "system":
                 msg["content"] = get_system_prompt()
@@ -29,10 +28,6 @@ def get_session(phone: str) -> list[dict]:
 
 
 def process_message(phone: str, message: str) -> tuple[str, list[str]]:
-    """Run one turn. Returns (reply_text, image_urls).
-
-    image_urls is populated only when a property is shown in this turn.
-    """
     messages = get_session(phone)
     messages.append({"role": "user", "content": message})
 
@@ -40,9 +35,19 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
 
     # ── Phone-scoped tool implementations ──────────────────────────────────────
 
-    def _search(neighborhood: str, max_budget: int, min_budget: int = 0) -> dict:
-        """Run DB search, store all results, return only the FIRST property."""
-        all_results = search_properties(neighborhood, max_budget, min_budget)
+    def _search(neighborhood: str, max_budget: int, min_budget: int = 0, rooms_count: int | None = None) -> dict:
+        """Run DB search, store all results, return only the FIRST property.
+
+        *neighborhood* may be a single name or comma-separated names (for
+        direction-based searches like "شمال").
+        """
+        # Split comma-separated neighborhoods into a list
+        if "," in str(neighborhood):
+            neighborhoods = [n.strip() for n in neighborhood.split(",") if n.strip()]
+        else:
+            neighborhoods = neighborhood
+
+        all_results = search_properties(neighborhoods, max_budget, min_budget, rooms_count)
         SEARCH_STATE[phone] = {"results": all_results, "index": 0}
 
         if not all_results:
@@ -54,6 +59,31 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
             "current_index": 1,
             "has_more": len(all_results) > 1,
             "property": first,
+        }
+
+    def _search_upcoming(
+        neighborhood: str,
+        max_budget: int,
+        min_budget: int = 0,
+        rooms_count: int | None = None,
+        days_ahead: int = 30,
+    ) -> dict:
+        """Find apartments becoming available soon."""
+        if "," in str(neighborhood):
+            neighborhoods = [n.strip() for n in neighborhood.split(",") if n.strip()]
+        else:
+            neighborhoods = neighborhood
+
+        results = search_upcoming_properties(
+            neighborhoods, max_budget, min_budget, rooms_count, days_ahead
+        )
+
+        if not results:
+            return {"found": 0}
+
+        return {
+            "total_found": len(results),
+            "properties": results,
         }
 
     def _next_property() -> dict:
@@ -79,6 +109,7 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
 
     available_functions = {
         "search_properties": _search,
+        "search_upcoming_properties": _search_upcoming,
         "next_property": _next_property,
     }
 
