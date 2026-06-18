@@ -109,7 +109,8 @@ def search_properties(
             p.rooms_count,
             p.baths_count,
             p.area,
-            p.whatsapp_number
+            p.whatsapp_number,
+            p.canonical_url
         FROM properties p
         LEFT JOIN buildings b ON b.id = p.building_id
         WHERE p.status = 'approved'
@@ -179,6 +180,7 @@ def search_upcoming_properties(
             p.baths_count,
             p.area,
             p.whatsapp_number,
+            p.canonical_url,
             p.rented_until
         FROM properties p
         LEFT JOIN buildings b ON b.id = p.building_id

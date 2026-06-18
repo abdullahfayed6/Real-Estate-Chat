@@ -115,6 +115,60 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
 
     # ── Main loop ───────────────────────────────────────────────────────────────
 
+    def _merge_search_calls(tool_calls: list) -> list:
+        """If the model issues multiple search_properties calls in one round,
+        merge them into a single call with all neighborhoods joined.
+
+        This prevents the LLM from making 3 separate calls (العارض, العقيق, النرجس)
+        when it should make one call with all three names.
+        """
+        search_calls = [
+            tc for tc in tool_calls if tc.function.name == "search_properties"
+        ]
+        other_calls = [
+            tc for tc in tool_calls if tc.function.name != "search_properties"
+        ]
+
+        if len(search_calls) <= 1:
+            return tool_calls  # nothing to merge
+
+        # Parse all search args
+        parsed = []
+        for tc in search_calls:
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            parsed.append(args)
+
+        # Collect all neighborhood names
+        all_neighborhoods = []
+        for args in parsed:
+            nb = args.get("neighborhood", "")
+            for n in str(nb).split(","):
+                n = n.strip()
+                if n and n not in all_neighborhoods:
+                    all_neighborhoods.append(n)
+
+        # Use params from first call, override neighborhood with merged list
+        base_args = parsed[0].copy()
+        base_args["neighborhood"] = ",".join(all_neighborhoods)
+
+        # Build a synthetic merged tool call using the first call's ID
+        import copy
+        merged_tc = copy.deepcopy(search_calls[0])
+        merged_tc.function.arguments = json.dumps(base_args, ensure_ascii=False)
+
+        logger.info(
+            "Merged %d search_properties calls into one: neighborhoods=%r",
+            len(search_calls), all_neighborhoods,
+        )
+
+        # Return the merged search call + a synthetic "skipped" response for the
+        # other search call IDs so the API gets a tool result for every call ID.
+        skipped_ids = [tc.id for tc in search_calls[1:]]
+        return [merged_tc] + other_calls, skipped_ids
+
     MAX_TOOL_ROUNDS = 8
     for _ in range(MAX_TOOL_ROUNDS):
         response = client.chat.completions.create(
@@ -129,7 +183,24 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
         if not assistant_msg.tool_calls:
             return (assistant_msg.content or "تحت أمرك.", images)
 
-        for tool_call in assistant_msg.tool_calls:
+        # Merge multiple search_properties calls into one if needed
+        tool_calls = assistant_msg.tool_calls
+        skipped_ids: list[str] = []
+        merge_result = _merge_search_calls(tool_calls)
+        if isinstance(merge_result, tuple):
+            tool_calls, skipped_ids = merge_result
+
+        # Add dummy tool results for skipped (merged) call IDs so OpenAI
+        # doesn't complain about missing tool responses.
+        for skipped_id in skipped_ids:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": skipped_id,
+                "name": "search_properties",
+                "content": json.dumps({"merged": True}, ensure_ascii=False),
+            })
+
+        for tool_call in tool_calls:
             fn_name = tool_call.function.name
             try:
                 fn_args = json.loads(tool_call.function.arguments or "{}")
