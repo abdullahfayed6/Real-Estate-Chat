@@ -1,5 +1,3 @@
-import json
-
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
@@ -9,19 +7,40 @@ from app.core.config import DATABASE_URL, logger
 engine: Engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 
 
-def _format_whatsapp_url(number: str | None) -> str | None:
-    """Convert a local Saudi number like 0555458305 → https://wa.me/966555458305"""
+# Invisible Unicode bidi/directional control chars that sometimes prefix phone
+# numbers in the DB (e.g. U+202D). They corrupt display and must be removed.
+_BIDI_CONTROLS = dict.fromkeys(
+    [0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069],
+    None,
+)
+
+
+def _format_phone(number: str | None) -> str | None:
+    """Return the supervisor phone normalised to +966 international format.
+
+    Strips invisible bidi/directional control chars, spaces, dashes and other
+    separators, then rebuilds the number as +966XXXXXXXXX regardless of whether
+    it was stored locally (05xxxxxxxx), with a country code (966...), or already
+    international (+966...).
+    """
     if not number:
         return None
-    cleaned = number.strip().lstrip("+")
-    # Remove leading country code if already present, then rebuild
-    if cleaned.startswith("966"):
-        local = cleaned[3:]
-    elif cleaned.startswith("0"):
-        local = cleaned[1:]
-    else:
-        local = cleaned
-    return f"https://wa.me/966{local}"
+
+    # Remove bidi controls, then keep digits only (drops spaces, dashes, +, etc.)
+    cleaned = str(number).translate(_BIDI_CONTROLS)
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    if not digits:
+        return None
+
+    # Drop any leading zeros (local "05..." or international "00966..." prefix),
+    # then strip the 966 country code if present, leaving the subscriber digits.
+    digits = digits.lstrip("0")
+    if digits.startswith("966"):
+        digits = digits[3:]
+
+    if not digits:
+        return None
+    return f"+966{digits}"
 
 
 def _format_rows(rows) -> list[dict]:
@@ -30,27 +49,13 @@ def _format_rows(rows) -> list[dict]:
     for row in rows:
         r = dict(row)
 
-        # Parse images JSON array and pick the first usable URL.
-        raw_images = r.pop("images", None)
-        image_url = None
-        if raw_images:
-            try:
-                imgs = json.loads(raw_images) if isinstance(raw_images, str) else raw_images
-                if isinstance(imgs, list) and imgs:
-                    first = imgs[0]
-                    if isinstance(first, str):
-                        image_url = (
-                            first if first.startswith("http")
-                            else f"https://mashimarketing.com/storage/{first}"
-                        )
-                    elif isinstance(first, dict):
-                        image_url = first.get("url") or first.get("path")
-            except (json.JSONDecodeError, TypeError):
-                pass
-        r["image_url"] = image_url
+        # Drop the raw images payload — image URLs are never surfaced anymore.
+        r.pop("images", None)
 
-        # Format WhatsApp URL correctly (Saudi country code)
-        r["whatsapp_url"] = _format_whatsapp_url(r.get("whatsapp_number"))
+        # Contact numbers sent when a customer accepts: supervisor first, guard
+        # as the fallback if the supervisor doesn't answer.
+        r["supervisor_phone"] = _format_phone(r.get("supervisor_phone"))
+        r["guard_phone"] = _format_phone(r.get("guard_phone"))
 
         # Convert Decimal → float for JSON serialisation.
         for key in ("monthly_price", "price_semi_annual", "price_annual"):
@@ -105,11 +110,11 @@ def search_properties(
             p.price_semi_annual,
             p.price_annual,
             p.description,
-            p.images,
             p.rooms_count,
             p.baths_count,
             p.area,
-            p.whatsapp_number,
+            p.supervisor_phone,
+            p.guard_phone,
             p.canonical_url
         FROM properties p
         LEFT JOIN buildings b ON b.id = p.building_id
@@ -175,11 +180,11 @@ def search_upcoming_properties(
             p.price_semi_annual,
             p.price_annual,
             p.description,
-            p.images,
             p.rooms_count,
             p.baths_count,
             p.area,
-            p.whatsapp_number,
+            p.supervisor_phone,
+            p.guard_phone,
             p.canonical_url,
             p.rented_until
         FROM properties p

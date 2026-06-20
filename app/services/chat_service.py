@@ -31,8 +31,6 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
     messages = get_session(phone)
     messages.append({"role": "user", "content": message})
 
-    images: list[str] = []
-
     # ── Phone-scoped tool implementations ──────────────────────────────────────
 
     def _search(neighborhood: str, max_budget: int, min_budget: int = 0, rooms_count: int | None = None) -> dict:
@@ -181,7 +179,7 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
         messages.append(assistant_msg.model_dump(exclude_none=True))
 
         if not assistant_msg.tool_calls:
-            return (assistant_msg.content or "تحت أمرك.", images)
+            return (assistant_msg.content or "تحت أمرك.", [])
 
         # Merge multiple search_properties calls into one if needed
         tool_calls = assistant_msg.tool_calls
@@ -219,12 +217,6 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
                     logger.exception("Tool %s raised", fn_name)
                     tool_result = {"error": str(exc)}
 
-            # Capture the image from whichever property was just surfaced
-            if isinstance(tool_result, dict) and "property" in tool_result:
-                prop = tool_result["property"]
-                if prop.get("image_url"):
-                    images = [prop["image_url"]]
-
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
@@ -233,4 +225,4 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
             })
 
     logger.warning("Exceeded tool-call rounds for %s", phone)
-    return ("معذرة، حصل خطأ بسيط. ممكن تعيد طلبك؟", images)
+    return ("معذرة، حصل خطأ بسيط. ممكن تعيد طلبك؟", [])
