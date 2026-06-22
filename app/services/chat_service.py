@@ -4,7 +4,7 @@ from openai import OpenAI
 
 from app.core.config import OPENAI_API_KEY, OPENAI_MODEL, logger
 from app.services.prompts import get_system_prompt, get_tools
-from app.db.database import search_properties, search_upcoming_properties
+from app.db.database import search_properties, search_upcoming_properties, price_range
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -51,11 +51,19 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
         if not all_results:
             return {"found": 0}
 
+        # TRUE price range from a SQL aggregate (NOT the LIMIT-10 result rows),
+        # filtered by the SAME neighborhood + rooms_count, so the model reports
+        # the REAL min/max for the requested type instead of inventing a range.
+        # NEVER quote a range outside [price_min, price_max].
+        pr = price_range(neighborhoods, rooms_count)
+
         first = all_results[0]
         return {
             "total_found": len(all_results),
             "current_index": 1,
             "has_more": len(all_results) > 1,
+            "price_min": pr.get("price_min"),
+            "price_max": pr.get("price_max"),
             "property": first,
         }
 

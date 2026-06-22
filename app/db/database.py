@@ -138,6 +138,59 @@ def search_properties(
     return results
 
 
+def price_range(
+    neighborhoods: "list[str] | str",
+    rooms_count: int | None = None,
+) -> dict:
+    """Return the TRUE min/max monthly price for approved listings matching the
+    given neighborhood(s) and (optionally) rooms_count.
+
+    Unlike search_properties (which is capped at LIMIT 10), this is a SQL
+    aggregate over ALL matching rows — so the reported range is never truncated.
+    Used to quote an accurate price range for the customer's requested type.
+    Returns {"count": 0} when nothing matches.
+    """
+    if isinstance(neighborhoods, str):
+        neighborhoods = [neighborhoods]
+
+    nb_terms = [f"%{nb}%" for nb in neighborhoods]
+    nb_clauses = " OR ".join(
+        f"b.name LIKE :nb{i} OR p.title LIKE :nb{i}" for i in range(len(nb_terms))
+    )
+    params: dict = {f"nb{i}": t for i, t in enumerate(nb_terms)}
+
+    rooms_clause = ""
+    if rooms_count is not None:
+        rooms_clause = "AND p.rooms_count = :rooms"
+        params["rooms"] = int(rooms_count)
+
+    sql = f"""
+        SELECT
+            COUNT(*)              AS cnt,
+            MIN(p.price_monthly)  AS min_price,
+            MAX(p.price_monthly)  AS max_price
+        FROM properties p
+        LEFT JOIN buildings b ON b.id = p.building_id
+        WHERE p.status = 'approved'
+          AND p.price_monthly IS NOT NULL
+          AND ({nb_clauses})
+          {rooms_clause}
+    """
+
+    with engine.connect() as conn:
+        row = conn.execute(text(sql), params).mappings().first()
+
+    count = int(row["cnt"]) if row and row["cnt"] is not None else 0
+    if count == 0:
+        return {"count": 0}
+
+    return {
+        "count": count,
+        "price_min": float(row["min_price"]) if row["min_price"] is not None else None,
+        "price_max": float(row["max_price"]) if row["max_price"] is not None else None,
+    }
+
+
 def search_upcoming_properties(
     neighborhoods: "list[str] | str",
     max_budget: int,
