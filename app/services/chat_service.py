@@ -49,6 +49,18 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
         SEARCH_STATE[phone] = {"results": all_results, "index": 0}
 
         if not all_results:
+            # No units WITHIN budget. Check the SAME neighborhood+type IGNORING
+            # the budget — if stock exists above budget, surface the REAL lowest
+            # price so the bot can keep the customer in the requested area and
+            # upsell, instead of jumping straight to other neighborhoods.
+            pr = price_range(neighborhoods, rooms_count)
+            if pr.get("count"):
+                return {
+                    "found": 0,
+                    "exists_above_budget": True,
+                    "price_min": pr.get("price_min"),
+                    "price_max": pr.get("price_max"),
+                }
             return {"found": 0}
 
         # TRUE price range from a SQL aggregate (NOT the LIMIT-10 result rows),
