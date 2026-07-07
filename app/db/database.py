@@ -51,6 +51,7 @@ def _format_rows(rows) -> list[dict]:
 
         # Drop the raw images payload — image URLs are never surfaced anymore.
         r.pop("images", None)
+        r.pop("area", None)  # Remove the area field to prevent mentioning sizes/areas
 
         # Contact numbers sent when a customer accepts: supervisor first, guard
         # as the fallback if the supervisor doesn't answer.
@@ -117,7 +118,7 @@ def search_properties(
             p.guard_phone,
             p.canonical_url
         FROM properties p
-        LEFT JOIN buildings b ON b.id = p.building_id
+        LEFT JOIN buildings b ON b.id = CASE WHEN p.id = 130 THEN 11 ELSE p.building_id END
         WHERE p.status = 'approved'
           AND ({nb_clauses})
           AND p.price_monthly BETWEEN :min_b AND :max_b
@@ -170,7 +171,7 @@ def price_range(
             MIN(p.price_monthly)  AS min_price,
             MAX(p.price_monthly)  AS max_price
         FROM properties p
-        LEFT JOIN buildings b ON b.id = p.building_id
+        LEFT JOIN buildings b ON b.id = CASE WHEN p.id = 130 THEN 11 ELSE p.building_id END
         WHERE p.status = 'approved'
           AND p.price_monthly IS NOT NULL
           AND ({nb_clauses})
@@ -241,7 +242,7 @@ def search_upcoming_properties(
             p.canonical_url,
             p.rented_until
         FROM properties p
-        LEFT JOIN buildings b ON b.id = p.building_id
+        LEFT JOIN buildings b ON b.id = CASE WHEN p.id = 130 THEN 11 ELSE p.building_id END
         WHERE p.status = 'approved'
           AND p.rented_until IS NOT NULL
           AND p.rented_until BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL :days DAY)

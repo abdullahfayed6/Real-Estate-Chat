@@ -4,7 +4,7 @@ from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("realestate-chat")

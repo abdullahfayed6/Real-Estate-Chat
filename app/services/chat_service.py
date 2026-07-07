@@ -8,6 +8,26 @@ from app.db.database import search_properties, search_upcoming_properties, price
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+def detect_type(title: str, description: str) -> str:
+    title_lower = title.lower() if title else ""
+    desc_lower = description.lower() if description else ""
+    
+    # 2 bedrooms
+    if "غرفتين" in title_lower or "2 غرف" in title_lower or "غرفتين" in desc_lower or "2 غرفه" in title_lower:
+        return "two_bedroom"
+        
+    # 1 bedroom + living room (غرفة وصالة)
+    if any(x in title_lower for x in ["وصاله", "وصالة"]):
+        return "one_bedroom"
+        
+    # studio / small room
+    return "studio"
+
+def filter_properties(properties: list[dict], apartment_type: str | None) -> list[dict]:
+    if not apartment_type:
+        return properties
+    return [p for p in properties if detect_type(p.get("title"), p.get("description")) == apartment_type]
+
 # Process-memory sessions: phone → list of chat messages
 SESSIONS: dict[str, list[dict]] = {}
 
@@ -33,7 +53,7 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
 
     # ── Phone-scoped tool implementations ──────────────────────────────────────
 
-    def _search(neighborhood: str, max_budget: int, min_budget: int = 0, rooms_count: int | None = None) -> dict:
+    def _search(neighborhood: str, max_budget: int, min_budget: int = 0, apartment_type: str | None = None) -> dict:
         """Run DB search, store all results, return only the FIRST property.
 
         *neighborhood* may be a single name or comma-separated names (for
@@ -45,37 +65,52 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
         else:
             neighborhoods = neighborhood
 
-        all_results = search_properties(neighborhoods, max_budget, min_budget, rooms_count)
-        SEARCH_STATE[phone] = {"results": all_results, "index": 0}
+        # Map apartment_type to rooms_count filter in SQL (first-level filtering)
+        sql_rooms = None
+        if apartment_type == "two_bedroom":
+            sql_rooms = 2
+        elif apartment_type in ("one_bedroom", "studio"):
+            sql_rooms = 1
 
-        if not all_results:
-            # No units WITHIN budget. Check the SAME neighborhood+type IGNORING
-            # the budget — if stock exists above budget, surface the REAL lowest
-            # price so the bot can keep the customer in the requested area and
-            # upsell, instead of jumping straight to other neighborhoods.
-            pr = price_range(neighborhoods, rooms_count)
-            if pr.get("count"):
+        # Fetch all results matching neighborhood and rooms_count
+        # Use high budget to calculate the accurate price range over all stock
+        all_results = search_properties(neighborhoods, max_budget=999999, min_budget=0, rooms_count=sql_rooms)
+
+        # Filter by specific type (studio vs one_bedroom) in Python
+        all_results = filter_properties(all_results, apartment_type)
+
+        # Separate stock (regardless of budget) and active results (within budget)
+        all_stock = all_results
+        active_results = [r for r in all_stock if min_budget <= r["monthly_price"] <= max_budget]
+
+        SEARCH_STATE[phone] = {"results": active_results, "index": 0}
+
+        # Calculate min/max prices for the exact type
+        if all_stock:
+            prices = [r["monthly_price"] for r in all_stock]
+            price_min = min(prices)
+            price_max = max(prices)
+        else:
+            price_min, price_max = None, None
+
+        if not active_results:
+            # Check if stock exists above budget
+            if all_stock:
                 return {
                     "found": 0,
                     "exists_above_budget": True,
-                    "price_min": pr.get("price_min"),
-                    "price_max": pr.get("price_max"),
+                    "price_min": price_min,
+                    "price_max": price_max,
                 }
             return {"found": 0}
 
-        # TRUE price range from a SQL aggregate (NOT the LIMIT-10 result rows),
-        # filtered by the SAME neighborhood + rooms_count, so the model reports
-        # the REAL min/max for the requested type instead of inventing a range.
-        # NEVER quote a range outside [price_min, price_max].
-        pr = price_range(neighborhoods, rooms_count)
-
-        first = all_results[0]
+        first = active_results[0]
         return {
-            "total_found": len(all_results),
+            "total_found": len(active_results),
             "current_index": 1,
-            "has_more": len(all_results) > 1,
-            "price_min": pr.get("price_min"),
-            "price_max": pr.get("price_max"),
+            "has_more": len(active_results) > 1,
+            "price_min": price_min,
+            "price_max": price_max,
             "property": first,
         }
 
@@ -83,7 +118,7 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
         neighborhood: str,
         max_budget: int,
         min_budget: int = 0,
-        rooms_count: int | None = None,
+        apartment_type: str | None = None,
         days_ahead: int = 30,
     ) -> dict:
         """Find apartments becoming available soon."""
@@ -92,9 +127,21 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
         else:
             neighborhoods = neighborhood
 
+        sql_rooms = None
+        if apartment_type == "two_bedroom":
+            sql_rooms = 2
+        elif apartment_type in ("one_bedroom", "studio"):
+            sql_rooms = 1
+
         results = search_upcoming_properties(
-            neighborhoods, max_budget, min_budget, rooms_count, days_ahead
+            neighborhoods, max_budget=999999, min_budget=0, rooms_count=sql_rooms, days_ahead=days_ahead
         )
+        
+        # Filter by type in Python
+        results = filter_properties(results, apartment_type)
+        
+        # Filter by budget
+        results = [r for r in results if min_budget <= r["monthly_price"] <= max_budget]
 
         if not results:
             return {"found": 0}

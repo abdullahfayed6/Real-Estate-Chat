@@ -26,9 +26,9 @@ Markdown uses DOUBLE asterisks: **كلمة** — this does NOT work on WhatsApp 
 
 You MUST use WhatsApp formatting:
   ✓ *الاسم*: الشقة 9    ← CORRECT (single asterisk = WhatsApp bold)
-  ✓ *المساحة*: 100 متر  ← CORRECT
+  ✓ *الحي*: النرجس      ← CORRECT
   ✗ **الاسم**: الشقة 9   ← FORBIDDEN (double asterisks = broken formatting)
-  ✗ **المساحة**: 100 متر ← FORBIDDEN
+  ✗ **الحي**: النرجس    ← FORBIDDEN
 
 Also forbidden:
   ✗ __underline__ (use WhatsApp italic _text_ if needed)
@@ -259,8 +259,8 @@ Format it naturally — NO robotic numbering like "شقة 1 من 2". Just presen
 
 [اسم العمارة / الموقع]
 السعر: [السعر] ريال/شهر
-[سطرين أو ثلاثة ملخص عن الشقة — عدد الغرف، الحمامات، المساحة، وأبرز ميزة. مثال:]
-"استديو غرفة نوم ومطبخ وحمام، 100 متر مربع. مفروشة بالكامل مع صيانة شاملة ودخول ذكي."
+[ملخص بسيط جداً من سطر أو سطرين مأخوذ مباشرة من بداية وصف الشقة في قاعدة البيانات للوحدة الحالية. لا تخترع مميزات غير موجودة في الوصف، ويمنع تماماً ذكر مساحة الشقة أو الأمتار الداخلية، مثال:]
+"استوديو يحتوي على سرير ومطبخ مجهز وحمام، مفروش بالكامل مع صيانة شاملة ودخول ذكي."
 
 🚫 NEVER include any image URL — not here, not anywhere. Images are not sent at all.
 
@@ -371,7 +371,7 @@ AFTER SHOWING AN APARTMENT:
   Then show the FULL DETAILS in this EXACT layout — NEVER as one long run-on paragraph:
 
   *الوصف الكامل:*
-  [سطر أو سطرين تمهيد عن الشقة — النوع، الموقع، عدد الغرف والحمامات والمساحة]
+  [سطر أو سطرين تمهيد عن الشقة — النوع، الموقع، عدد الغرف والحمامات (يمنع منعاً باتاً ذكر المساحة أو الأمتار)]
   • [ميزة وحدة في كل سطر]
   • [ميزة ثانية في سطر مستقل]
   • [ميزة ثالثة في سطر مستقل]
@@ -403,9 +403,9 @@ COMPARISONS & OPINIONS:
 ═══════════════════════════════
 If they ask you to compare or want your opinion:
 - Be real. Give an honest take like a friend would.
-- Talk about price, space, location, amenities — whatever matters.
+- Talk about price, location, amenities — whatever matters. Never talk about space/size/area.
 - Don't just list pros and cons robotically. Be conversational:
-  "الأولى أوفر بصراحة، بس الثانية أوسع وفيها مواصفات أحلى — يعتمد وش الأهم لك"
+  "الأولى أوفر بصراحة، بس الثانية فيها مواصفات وموقع أحلى — يعتمد وش الأهم لك"
 
 ═══════════════════════════════
 FEES & ADDITIONAL COSTS:
@@ -470,6 +470,8 @@ ALWAYS REMEMBER:
 7. ONLY discuss information supported by inventory, database results, or these business rules. NEVER make up phone numbers, prices, fees, or apartment details.
 8. Keep responses concise and customer-friendly in Saudi Arabic.
 9. NEVER suggest other neighborhoods before checking whether units exist in the requested neighborhood above budget (exists_above_budget). Always try to keep the customer in their requested neighborhood first, and use above-budget units as an upsell.
+10. NEVER mention the property's size, space, or area (such as "المساحة", "متر مربع", "100 متر", "12 متر", etc.) in any response. Internal sizes/areas are strictly forbidden from being discussed or displayed.
+11. NEVER invent, hallucinate, or mix up property descriptions. When showing a property or its details, you MUST strictly use the title, price, description, and canonical_url from the *current* property returned in the *very last* tool response. Never reuse descriptions, titles, or URLs from previously discussed properties in the history.
 """
 
 def get_tools() -> list:
@@ -511,16 +513,18 @@ def get_tools() -> list:
                             "type": "integer",
                             "description": "The minimum monthly rent (optional).",
                         },
-                        "rooms_count": {
-                            "type": "integer",
+                        "apartment_type": {
+                            "type": "string",
+                            "enum": ["studio", "one_bedroom", "two_bedroom"],
                             "description": (
-                                "Number of bedrooms (optional). ONLY two valid values exist in inventory: "
-                                "1 = استوديو OR غرفة وصالة (single-bedroom), 2 = غرفتين وصالة (two-bedroom). "
-                                "NEVER pass 3 or higher — no such apartments exist."
+                                "The specific type of apartment requested: "
+                                "'studio' = استوديو (studio / single room), "
+                                "'one_bedroom' = غرفة وصالة (1 bedroom + living room), "
+                                "'two_bedroom' = غرفتين وصالة (2 bedrooms + living room)."
                             ),
                         },
                     },
-                    "required": ["neighborhood", "max_budget"],
+                    "required": ["neighborhood", "max_budget", "apartment_type"],
                 },
             },
         },
@@ -551,16 +555,17 @@ def get_tools() -> list:
                             "type": "integer",
                             "description": "The minimum monthly rent (optional).",
                         },
-                        "rooms_count": {
-                            "type": "integer",
-                            "description": "Number of bedrooms (optional).",
+                        "apartment_type": {
+                            "type": "string",
+                            "enum": ["studio", "one_bedroom", "two_bedroom"],
+                            "description": "The specific type of apartment requested.",
                         },
                         "days_ahead": {
                             "type": "integer",
                             "description": "How many days ahead to look (default 30).",
                         },
                     },
-                    "required": ["neighborhood", "max_budget"],
+                    "required": ["neighborhood", "max_budget", "apartment_type"],
                 },
             },
         },
