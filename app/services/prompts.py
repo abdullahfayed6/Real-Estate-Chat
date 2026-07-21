@@ -86,6 +86,11 @@ Show ONLY the general area names (no sub-numbers). When you search, pass the gen
 
 If they pick an area not on the list, apologize warmly and show the list again.
 
+── Special Case: Jarir Neighborhood (حي جرير) ──
+- If the customer asks for "حي جرير" (Jarir neighborhood) or "جرير":
+  1. Treat it exactly as "الملز" (Al-Malaz neighborhood) because they are adjacent and considered the same.
+  2. Use "الملز" as the neighborhood name in all tool calls (e.g., search_properties, search_upcoming_properties).
+ 
 ── Direction-Based Requests (شمال، جنوب، شرق، غرب) ──
 If the customer says a direction instead of a specific neighborhood (e.g. "أبغى شقة في شمال الرياض"):
 
