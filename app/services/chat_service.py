@@ -1,9 +1,11 @@
 import json
+import re
 
 from openai import OpenAI
 
 from app.core.config import OPENAI_API_KEY, OPENAI_MODEL, logger
 from app.services.prompts import get_system_prompt, get_tools
+from app.db.seed_data import get_config
 from app.db.database import search_properties, search_upcoming_properties, price_range
 
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -24,7 +26,7 @@ def detect_type(title: str, description: str) -> str:
     return "studio"
 
 def filter_properties(properties: list[dict], apartment_type: str | None) -> list[dict]:
-    if not apartment_type:
+    if not apartment_type or apartment_type == "any":
         return properties
     return [p for p in properties if detect_type(p.get("title"), p.get("description")) == apartment_type]
 
@@ -34,6 +36,108 @@ SESSIONS: dict[str, list[dict]] = {}
 # Separate store for search result state (not mixed into message history)
 # phone → {"results": [...], "index": int}
 SEARCH_STATE: dict[str, dict] = {}
+
+# Keep search slots separate from the LLM's free-form conversation history.
+CRITERIA: dict[str, dict] = {}
+
+_DIRECTION_AREAS = {
+    "شمال": ("العارض", "العقيق", "النرجس"), "شرق": ("المونسية",),
+    "غرب": ("العريجاء",), "وسط": ("الملز",), "جنوب": ("منفوحة",),
+}
+
+
+def _normalise_arabic(value: str) -> str:
+    return re.sub(r"[\u064b-\u0652ـ]", "", value.lower()).translate(
+        str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي", "ة": "ه"})
+    )
+
+
+def _update_criteria(phone: str, message: str) -> dict:
+    """Extract deterministic slots so requests work in any word order."""
+    criteria = CRITERIA.setdefault(phone, {})
+    text = _normalise_arabic(message.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")))
+    areas = get_config()["neighborhood_groups"]
+    normalised_areas = {_normalise_arabic(area): area for area in areas}
+    direction_areas: list[str] = []
+    for direction, candidates in _DIRECTION_AREAS.items():
+        if re.search(rf"(?<!\w){direction}(?!\w)", text):
+            expected = {_normalise_arabic(x) for x in candidates}
+            direction_areas = [area for area in areas if _normalise_arabic(area) in expected]
+            break
+
+    generic_any = any(x in text for x in ("اي شيء", "اي شئ", "اي شي", "اي نوع", "ما يفرق النوع", "مايفرق النوع"))
+    # "أي شيء" answers the question that is currently missing. If the type is
+    # already known, it naturally means the customer has no budget limit.
+    if generic_any and criteria.get("apartment_type") and "max_budget" not in criteria:
+        criteria["min_budget"], criteria["max_budget"] = 0, 999999
+    elif generic_any:
+        criteria["apartment_type"] = "any"
+    elif "غرفتين" in text or re.search(r"(?<!\d)2\s*غرف", text):
+        criteria["apartment_type"] = "two_bedroom"
+    elif "استوديو" in text:
+        criteria["apartment_type"] = "studio"
+    elif ("غرفه" in text or "اوضه" in text or re.search(r"(?<!\d)1\s*غرف", text)) and "صاله" in text:
+        criteria["apartment_type"] = "one_bedroom"
+
+    unrestricted_area = any(x in text for x in (
+        "اي حي", "اي مكان", "كل الاحياء", "كل حي", "وين ما كان", "كل الرياض", "الرياض كلها",
+    ))
+    if unrestricted_area:
+        selected = direction_areas or areas
+        criteria["neighborhood"] = ",".join(selected)
+        criteria["area_scope"] = "all neighborhoods in the requested direction" if direction_areas else "all available neighborhoods"
+    elif "جرير" in text:
+        criteria["neighborhood"], criteria["area_scope"] = "الملز", "الملز (جرير)"
+    else:
+        selected = [area for key, area in normalised_areas.items() if key in text]
+        if not selected:
+            selected = direction_areas
+        if selected:
+            criteria["neighborhood"] = ",".join(dict.fromkeys(selected))
+            criteria["area_scope"] = "customer location preference"
+
+    if any(x in text for x in ("اغلي", "اعلي سعر", "بسعر اعلي")):
+        criteria["sort_order"] = "desc"
+        criteria["min_budget"], criteria["max_budget"] = 0, 999999
+        SEARCH_STATE.pop(phone, None)  # This is a new search, never the next old result.
+    elif any(x in text for x in ("ارخص", "اوفرا", "اوفر")):
+        criteria["sort_order"] = "asc"
+        SEARCH_STATE.pop(phone, None)
+
+    excluded = [
+        area for key, area in normalised_areas.items()
+        if re.search(rf"(?:ما\s*ابي|مو|مش|غير|بدون)\s*(?:في\s*)?.{{0,12}}{re.escape(key)}", text)
+    ]
+    if excluded:
+        criteria["excluded_neighborhoods"] = list(dict.fromkeys(excluded))
+        chosen = [n.strip() for n in criteria.get("neighborhood", "").split(",") if n.strip()]
+        remaining = [n for n in chosen if n not in criteria["excluded_neighborhoods"]]
+        if remaining:
+            criteria["neighborhood"] = ",".join(remaining)
+
+    if "max_budget" not in criteria and any(x in text for x in (
+        "اي سعر", "باي سعر", "اي ميزانيه", "باي ميزانيه", "السعر ما يفرق",
+        "مفتوحه الميزانيه", "الميزانيه مفتوحه", "بدون حد", "ايجار مفتوح",
+    )):
+        criteria["min_budget"], criteria["max_budget"] = 0, 999999
+    else:
+        # Never mistake "2 غرف" / "غرفة 1" for a monthly budget.
+        budget_text = re.sub(r"(?<!\d)[12]\s*غرف\w*|غرف\w*\s*[12](?!\d)", "", text)
+        numbers = [int(n) for n in re.findall(r"\d+", budget_text)]
+        if len(numbers) >= 2 and ("بين" in budget_text or re.search(r"من\s*\d+\s*(?:الى|الي|ل)\s*\d+", budget_text)):
+            criteria["min_budget"], criteria["max_budget"] = min(numbers[:2]), max(numbers[:2])
+        elif numbers:
+            amount = numbers[-1]
+            criteria["min_budget"], criteria["max_budget"] = (amount, 999999) if any(x in text for x in ("فوق", "اكثر", "اعلي")) else (0, amount)
+    return criteria
+
+
+def _criteria_context(criteria: dict) -> str:
+    fields = {key: criteria.get(key, "MISSING") for key in ("neighborhood", "area_scope", "excluded_neighborhoods", "apartment_type", "min_budget", "max_budget", "sort_order")}
+    return (
+        "INTERNAL CONFIRMED SEARCH STATE (never expose it): " + json.dumps(fields, ensure_ascii=False)
+        + ". Values other than MISSING were already supplied by the customer. If neighborhood, apartment_type, and max_budget exist, call search_properties now; never ask for them again. If sort_order is desc or asc from the latest message, this is a NEW search; do not use next_property or any old result."
+    )
 
 
 def get_session(phone: str) -> list[dict]:
@@ -49,11 +153,12 @@ def get_session(phone: str) -> list[dict]:
 
 def process_message(phone: str, message: str) -> tuple[str, list[str]]:
     messages = get_session(phone)
+    messages.append({"role": "system", "content": _criteria_context(_update_criteria(phone, message))})
     messages.append({"role": "user", "content": message})
 
     # ── Phone-scoped tool implementations ──────────────────────────────────────
 
-    def _search(neighborhood: str, max_budget: int, min_budget: int = 0, apartment_type: str | None = None) -> dict:
+    def _search(neighborhood: str, max_budget: int, min_budget: int = 0, apartment_type: str | None = None, sort_order: str = "asc") -> dict:
         """Run DB search, store all results, return only the FIRST property.
 
         *neighborhood* may be a single name or comma-separated names (for
@@ -65,6 +170,13 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
         else:
             neighborhoods = neighborhood
 
+        excluded = set(CRITERIA.get(phone, {}).get("excluded_neighborhoods", []))
+        if excluded:
+            candidates = [neighborhoods] if isinstance(neighborhoods, str) else neighborhoods
+            neighborhoods = [n for n in candidates if n not in excluded]
+            if not neighborhoods:
+                return {"found": 0, "error": "All requested neighborhoods are excluded by the customer."}
+
         # Map apartment_type to rooms_count filter in SQL (first-level filtering)
         sql_rooms = None
         if apartment_type == "two_bedroom":
@@ -74,7 +186,10 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
 
         # Fetch all results matching neighborhood and rooms_count
         # Use high budget to calculate the accurate price range over all stock
-        all_results = search_properties(neighborhoods, max_budget=999999, min_budget=0, rooms_count=sql_rooms)
+        # Fetch the full candidate set before applying the exact type filter.
+        # Limiting SQL first caused false "no availability" answers when a match
+        # (such as Al Olaya) appeared after the first 10 rows.
+        all_results = search_properties(neighborhoods, max_budget=999999, min_budget=0, rooms_count=sql_rooms, limit=None, sort_order=sort_order)
 
         # Filter by specific type (studio vs one_bedroom) in Python
         all_results = filter_properties(all_results, apartment_type)
@@ -126,6 +241,13 @@ def process_message(phone: str, message: str) -> tuple[str, list[str]]:
             neighborhoods = [n.strip() for n in neighborhood.split(",") if n.strip()]
         else:
             neighborhoods = neighborhood
+
+        excluded = set(CRITERIA.get(phone, {}).get("excluded_neighborhoods", []))
+        if excluded:
+            candidates = [neighborhoods] if isinstance(neighborhoods, str) else neighborhoods
+            neighborhoods = [n for n in candidates if n not in excluded]
+            if not neighborhoods:
+                return {"found": 0, "error": "All requested neighborhoods are excluded by the customer."}
 
         sql_rooms = None
         if apartment_type == "two_bedroom":

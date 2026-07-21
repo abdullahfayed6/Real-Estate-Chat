@@ -72,6 +72,8 @@ def search_properties(
     max_budget: int,
     min_budget: int = 0,
     rooms_count: int | None = None,
+    limit: int | None = 10,
+    sort_order: str = "asc",
 ):
     """Search approved properties by neighborhood(s), budget, and optional room count.
 
@@ -80,6 +82,7 @@ def search_properties(
     """
     min_budget = int(min_budget) if min_budget is not None else 0
     max_budget = int(max_budget) if max_budget is not None else 10 ** 9
+    sort_order = "DESC" if str(sort_order).lower() == "desc" else "ASC"
 
     # Normalise to a list
     if isinstance(neighborhoods, str):
@@ -100,6 +103,10 @@ def search_properties(
     if rooms_count is not None:
         rooms_clause = "AND p.rooms_count = :rooms"
         params["rooms"] = int(rooms_count)
+
+    limit_clause = "" if limit is None else "LIMIT :limit"
+    if limit is not None:
+        params["limit"] = int(limit)
 
     sql = f"""
         SELECT
@@ -123,8 +130,8 @@ def search_properties(
           AND ({nb_clauses})
           AND p.price_monthly BETWEEN :min_b AND :max_b
           {rooms_clause}
-        ORDER BY p.price_monthly ASC
-        LIMIT 10
+        ORDER BY p.price_monthly {sort_order}
+        {limit_clause}
     """
 
     with engine.connect() as conn:
